@@ -31,17 +31,19 @@ import { createFindTool } from "./coding-tools/find.js";
 import { createGrepTool } from "./coding-tools/grep.js";
 import { createReadTool } from "./coding-tools/read.js";
 import { createWriteTool } from "./coding-tools/write.js";
+import { NodeExecutionEnv } from "./harness/env.js";
 import { ProcessTerminal } from "./terminal.js";
 import { ChatLog } from "./chat-log.js";
 
 async function runPrompt(prompt: string) : Promise<void>  {
     const cwd= process.cwd();
+    const env = new NodeExecutionEnv({ cwd });
     const tools = [
-      createReadTool(cwd),
-      createWriteTool(cwd),
-      createEditTool(cwd),
-      createBashTool(cwd),
-      createGrepTool(cwd),
+      createReadTool(env),
+      createWriteTool(env),
+      createEditTool(env),
+      createBashTool(env),
+      createGrepTool(env),
       createFindTool(cwd),
     ];
 

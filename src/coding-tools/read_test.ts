@@ -1,6 +1,8 @@
+import { NodeExecutionEnv } from "../harness/env.js";
 import { createReadTool } from './read.js';
 
-const read = createReadTool(process.cwd());
+const env = new NodeExecutionEnv({ cwd: process.cwd() });
+const read = createReadTool(env);
 const result = await read.execute({ path: "package.json"  });
 
 console.log(result.content[0].text);

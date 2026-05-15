@@ -1,7 +1,4 @@
-import { spawn } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import type { ExecutionEnv } from "../harness/env.js";
 import type { AgentTool, ToolResult } from "../tools.js";
 import {
   DEFAULT_MAX_BYTES,
@@ -22,21 +19,7 @@ export interface BashDetails {
   exitCode: number | null;
 }
 
-function killTree(pid: number): void {
-  // On macOS / Linux we spawned `detached: true`, so the process is its
-  // own group leader — kill the whole group with -pid.
-  try {
-    process.kill(-pid, "SIGTERM");
-  } catch {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      /* already dead */
-    }
-  }
-}
-
-export function createBashTool(cwd: string): AgentTool {
+export function createBashTool(env: ExecutionEnv): AgentTool {
   return {
     name: "bash",
     description:
@@ -53,80 +36,62 @@ export function createBashTool(cwd: string): AgentTool {
       required: ["command"],
       additionalProperties: false,
     },
-    execute: (args, signal): Promise<ToolResult> => {
+    execute: async (args, signal): Promise<ToolResult> => {
       const { command, timeout } = args as BashArgs;
-      return new Promise<ToolResult>((resolve, reject) => {
-        if (signal?.aborted) {
-          reject(new Error("aborted"));
-          return;
-        }
-        const child = spawn("bash", ["-lc", command], {
-          cwd,
-          detached: process.platform !== "win32",
-          stdio: ["ignore", "pipe", "pipe"],
+      if (signal?.aborted) throw new Error("aborted");
+
+      let timedOut = false;
+      const innerController = new AbortController();
+      const timeoutHandle = timeout
+        ? setTimeout(() => {
+            timedOut = true;
+            innerController.abort();
+          }, timeout * 1000)
+        : undefined;
+      const onOuterAbort = () => innerController.abort();
+      signal?.addEventListener("abort", onOuterAbort, { once: true });
+
+      let result;
+      try {
+        result = await env.exec(command, { signal: innerController.signal });
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        signal?.removeEventListener("abort", onOuterAbort);
+      }
+
+      if (timedOut) throw new Error(`timeout: ${timeout}s`);
+
+      const fullOutput = result.stdout + result.stderr;
+      const truncation = truncateHead(fullOutput);
+
+      let fullOutputPath: string | undefined;
+      if (truncation.truncated) {
+        fullOutputPath = await env.createTempFile({
+          prefix: "pi-bash-",
+          suffix: ".txt",
         });
-        const chunks: Buffer[] = [];
-        let timedOut = false;
-        let killed = false;
+        await env.writeFile(fullOutputPath, fullOutput);
+      }
 
-        const timeoutHandle = timeout
-          ? setTimeout(() => {
-              timedOut = true;
-              if (child.pid) killTree(child.pid);
-            }, timeout * 1000)
-          : undefined;
+      const aborted = signal?.aborted ?? false;
+      let text = truncation.content || "(no output)";
+      if (aborted) text += `\n\n[Command aborted]`;
+      else if (result.exitCode !== 0)
+        text += `\n\n[Exited with code ${result.exitCode}]`;
 
-        const onAbort = () => {
-          killed = true;
-          if (child.pid) killTree(child.pid);
-        };
-        signal?.addEventListener("abort", onAbort, { once: true });
+      if (truncation.truncated) {
+        text +=
+          `\n\n[Truncated: showing ${truncation.outputLines} of ` +
+          `${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} ` +
+          `of ${formatSize(truncation.totalBytes)}). Full output at ${fullOutputPath}]`;
+      }
 
-        const onData = (b: Buffer) => chunks.push(b);
-        child.stdout?.on("data", onData);
-        child.stderr?.on("data", onData);
-
-        child.on("error", (err) => {
-          if (timeoutHandle) clearTimeout(timeoutHandle);
-          signal?.removeEventListener("abort", onAbort);
-          reject(err);
-        });
-        child.on("close", async (exitCode) => {
-          if (timeoutHandle) clearTimeout(timeoutHandle);
-          signal?.removeEventListener("abort", onAbort);
-
-          const fullOutput = Buffer.concat(chunks).toString("utf-8");
-          const truncation = truncateHead(fullOutput);
-
-          let fullOutputPath: string | undefined;
-          if (truncation.truncated) {
-            const dir = await mkdtemp(join(tmpdir(), "pi-bash-"));
-            fullOutputPath = join(dir, "output.txt");
-            await writeFile(fullOutputPath, fullOutput, "utf-8");
-          }
-
-          let text = truncation.content || "(no output)";
-          if (timedOut) text += `\n\n[Command timed out after ${timeout}s]`;
-          else if (killed) text += `\n\n[Command aborted]`;
-          else if (exitCode !== 0)
-            text += `\n\n[Exited with code ${exitCode}]`;
-
-          if (truncation.truncated) {
-            text +=
-              `\n\n[Truncated: showing ${truncation.outputLines} of ` +
-              `${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} ` +
-              `of ${formatSize(truncation.totalBytes)}). Full output at ${fullOutputPath}]`;
-          }
-
-          const details: BashDetails = {
-            truncation: truncation.truncated ? truncation : undefined,
-            fullOutputPath,
-            exitCode,
-          };
-          if (timedOut) reject(new Error(`timeout: ${timeout}s`));
-          else resolve({ content: [{ type: "text", text }], details });
-        });
-      });
+      const details: BashDetails = {
+        truncation: truncation.truncated ? truncation : undefined,
+        fullOutputPath,
+        exitCode: result.exitCode,
+      };
+      return { content: [{ type: "text", text }], details };
     },
   };
 }

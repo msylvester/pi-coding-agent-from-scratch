@@ -1,19 +1,11 @@
-import { access, readFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import type { ExecutionEnv } from "../harness/env.js";
 import type { AgentTool, ToolResult } from "../tools.js";
-import { resolveToCwd } from "./path-utils.js";
 import {
   DEFAULT_MAX_BYTES,
   formatSize,
   truncateHead,
   type TruncationResult,
 } from "./truncate.js";
-
-const TEXT_EXTS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".json", ".md", ".txt",
-  ".py", ".rb", ".go", ".rs", ".java", ".c", ".h", ".cpp",
-  ".css", ".html", ".yaml", ".yml", ".toml", ".sh", ".sql",
-]);
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 
@@ -27,7 +19,7 @@ export interface ReadArgs {
   limit?: number;
 }
 
-export function createReadTool(cwd: string): AgentTool {
+export function createReadTool(env: ExecutionEnv): AgentTool {
   return {
     name: "read",
     description:
@@ -46,12 +38,9 @@ export function createReadTool(cwd: string): AgentTool {
     },
     execute: async (args, signal): Promise<ToolResult> => {
       const { path, offset, limit } = args as ReadArgs;
-      const absolute = resolveToCwd(path, cwd);
-
       if (signal?.aborted) throw new Error("aborted");
-      await access(absolute, constants.R_OK);
 
-      const ext = absolute.slice(absolute.lastIndexOf(".")).toLowerCase();
+      const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
       if (IMAGE_EXTS.has(ext)) {
         return {
           content: [
@@ -63,8 +52,7 @@ export function createReadTool(cwd: string): AgentTool {
         };
       }
 
-      const buffer = await readFile(absolute);
-      const text = buffer.toString("utf-8");
+      const text = await env.readTextFile(path);
       const allLines = text.split("\n");
       const totalLines = allLines.length;
 

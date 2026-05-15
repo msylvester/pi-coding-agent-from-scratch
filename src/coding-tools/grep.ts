@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import type { ExecutionEnv } from "../harness/env.js";
 import type { AgentTool, ToolResult } from "../tools.js";
 import { resolveToCwd } from "./path-utils.js";
 
@@ -12,7 +12,11 @@ export interface GrepArgs {
   limit?: number;
 }
 
-export function createGrepTool(cwd: string): AgentTool {
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+export function createGrepTool(env: ExecutionEnv): AgentTool {
   return {
     name: "grep",
     description:
@@ -33,9 +37,11 @@ export function createGrepTool(cwd: string): AgentTool {
       required: ["pattern"],
       additionalProperties: false,
     },
-    execute: (args, signal): Promise<ToolResult> => {
+    execute: async (args, signal): Promise<ToolResult> => {
       const a = args as GrepArgs;
-      const root = resolveToCwd(a.path ?? ".", cwd);
+      if (signal?.aborted) throw new Error("aborted");
+
+      const root = resolveToCwd(a.path ?? ".", env.cwd);
       const limit = a.limit ?? 200;
       const rgArgs: string[] = ["--line-number", "--no-heading", "--color=never"];
       if (a.ignoreCase) rgArgs.push("-i");
@@ -45,30 +51,18 @@ export function createGrepTool(cwd: string): AgentTool {
       rgArgs.push("--max-count", String(limit));
       rgArgs.push(a.pattern, root);
 
-      return new Promise<ToolResult>((resolve, reject) => {
-        if (signal?.aborted) return reject(new Error("aborted"));
-        const child = spawn("rg", rgArgs, { cwd });
-        const chunks: Buffer[] = [];
-        child.stdout?.on("data", (b: Buffer) => chunks.push(b));
-        child.stderr?.on("data", (b: Buffer) => chunks.push(b));
-        const onAbort = () => child.kill("SIGTERM");
-        signal?.addEventListener("abort", onAbort, { once: true });
-        child.on("error", (err) => {
-          signal?.removeEventListener("abort", onAbort);
-          reject(err);
-        });
-        child.on("close", (code) => {
-          signal?.removeEventListener("abort", onAbort);
-          const out = Buffer.concat(chunks).toString("utf-8");
-          // ripgrep exits 1 when no matches — treat as empty result, not error
-          if (code !== 0 && code !== 1) {
-            return reject(new Error(`rg exited ${code}: ${out}`));
-          }
-          resolve({
-            content: [{ type: "text", text: out || "(no matches)" }],
-          });
-        });
-      });
+      const cmd = ["rg", ...rgArgs.map(shellQuote)].join(" ");
+      const { stdout, stderr, exitCode } = await env.exec(cmd, { signal });
+      const out = stdout + stderr;
+
+      // ripgrep exits 1 when no matches — treat as empty result, not error
+      if (exitCode !== 0 && exitCode !== 1) {
+        throw new Error(`rg exited ${exitCode}: ${out}`);
+      }
+
+      return {
+        content: [{ type: "text", text: out || "(no matches)" }],
+      };
     },
   };
 }

@@ -1,6 +1,5 @@
-import { readFile, writeFile } from "node:fs/promises";
+import type { ExecutionEnv } from "../harness/env.js";
 import type { AgentTool, ToolResult } from "../tools.js";
-import { resolveToCwd } from "./path-utils.js";
 
 export interface EditOp {
   oldText: string;
@@ -68,7 +67,7 @@ function makeDiff(before: string, after: string, path: string): string {
   return out.join("\n");
 }
 
-export function createEditTool(cwd: string): AgentTool {
+export function createEditTool(env: ExecutionEnv): AgentTool {
   return {
     name: "edit",
     description:
@@ -101,13 +100,12 @@ export function createEditTool(cwd: string): AgentTool {
         throw new Error("edit: edits must be a non-empty array");
       }
       if (signal?.aborted) throw new Error("aborted");
-      const absolute = resolveToCwd(path, cwd);
-      const before = (await readFile(absolute)).toString("utf-8");
+      const before = await env.readTextFile(path);
       let after = before;
       for (const edit of edits) {
         after = applyEdit(after, edit, path);
       }
-      await writeFile(absolute, after, "utf-8");
+      await env.writeFile(path, after);
       const details: EditDetails = { diff: makeDiff(before, after, path) };
       return {
         content: [

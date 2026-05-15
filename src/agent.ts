@@ -19,7 +19,7 @@ export class Agent {
 	private subscribers = new Set<AgentSubscriber>();
 	private loopConfig: AgentLoopConfig;
 	private activeAbort?: AbortController;
-	private activeRun?: Promise<void>;
+private activeRun?: Promise<void>;
 	private steerQueue: AgentMessage[] = [];
 	private followUpQueue: AgentMessage[] = [];
 
